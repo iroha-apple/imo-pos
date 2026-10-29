@@ -1,0 +1,20 @@
+rules_version = '2';
+// 芋を出す。POS2026 のセキュリティルール
+// Firebase の画面 → Firestore Database → ルール タブ に、この内容をまるごと貼り付けて「公開」を押します。
+// ログインしている人だけが読み書きできます（ログインしていない人は何もできません）。
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+
+    match /users/{id}      { allow read, write: if signedIn(); }
+    match /menu/{id}       { allow read, write: if signedIn(); }
+    match /tags/{id}       { allow read, write: if signedIn(); }
+    match /orders/{id}     { allow read, write: if signedIn(); }
+    match /cashChecks/{id} { allow read, write: if signedIn(); }
+    match /settings/{id}   { allow read, write: if signedIn(); }
+    match /ping/{id}       { allow read, write: if signedIn(); }
+
+    // 操作の記録は「追加」だけできる（あとから書き換え・削除はできない）
+    match /logs/{id}       { allow read, create: if signedIn(); }
+  }
+}

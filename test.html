@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>接続テスト｜芋を出す。POS2026</title>
+<link href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@500;800&display=swap" rel="stylesheet">
+<style>
+body{margin:0;font-family:'M PLUS Rounded 1c',sans-serif;background:#FFF8E7;color:#2E1A47;display:grid;place-items:center;min-height:100vh;padding:16px;box-sizing:border-box}
+.card{width:100%;max-width:440px;background:#fff;border:3px solid #2E1A47;border-radius:26px;padding:22px;box-shadow:0 6px 0 #2E1A47;text-align:center}
+h1{font-size:22px;color:#6B3FA0;margin:0 0 4px}
+.sync{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:10px 18px;font-weight:800;font-size:20px;margin:12px 0}
+.ok{background:#DDF5E8;color:#13804B}.wait{background:#FFEBCF;color:#A35F00}.off{background:#E5484D;color:#fff}
+.dot{width:14px;height:14px;border-radius:50%;background:currentColor}
+.count{font-size:96px;font-weight:800;line-height:1;color:#6B3FA0;text-shadow:3px 3px 0 #FFC83D}
+.by{color:#6A5A80;min-height:1.4em}
+input{width:100%;box-sizing:border-box;min-height:50px;border:2px solid #EADFC8;border-radius:14px;padding:0 14px;font-size:18px;margin:6px 0;font-family:inherit}
+button{width:100%;min-height:60px;border-radius:999px;border:2px solid #4E2A7A;background:#6B3FA0;color:#fff;font-size:20px;font-weight:800;margin-top:10px;font-family:inherit}
+button:active{transform:translateY(2px)}
+.err{color:#E5484D;font-weight:800;min-height:1.4em}
+.steps{text-align:left;font-size:14px;color:#6A5A80;line-height:1.7}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🍠 接続テスト</h1>
+  <div id="loginBox">
+    <p>テスト用に、管理者のIDでログインしてください</p>
+    <input id="lid" placeholder="ログインID（例：s01）" autocapitalize="off">
+    <input id="lpw" type="password" placeholder="パスワード">
+    <p class="err" id="err"></p>
+    <button id="loginBtn">ログイン</button>
+  </div>
+  <div id="testBox" hidden>
+    <div id="sync" class="sync wait"><span class="dot"></span><span>接続中…</span></div>
+    <div class="count" id="count">-</div>
+    <div class="by" id="by"></div>
+    <button id="send">テスト送信（＋1）</button>
+    <div class="steps">
+      ① 2台以上で同時にこのページを開く<br>
+      ② 1台で「テスト送信」→ 他の端末の数字が1秒前後で変わればOK<br>
+      ③ Wi-Fiやモバイル通信を切る → 赤の「オフライン」になればOK<br>
+      ④ つなぎ直す → 緑の「同期OK」に戻ればOK
+    </div>
+  </div>
+</div>
+<script type="module">
+import { firebaseConfig } from './firebase-config.js';
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+import { getAuth, signInWithEmailAndPassword, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+import { getFirestore, doc, onSnapshot, setDoc, increment } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
+
+const $ = id => document.getElementById(id);
+if (!firebaseConfig.apiKey || firebaseConfig.apiKey.includes('ここに')) {
+  $('err').textContent = 'firebase-config.js に設定値が貼り付けられていません';
+}
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const device = /iPad/.test(navigator.userAgent) ? 'iPad' : /iPhone|Android/.test(navigator.userAgent) ? 'スマホ' : 'PC';
+let fromCache = true, pending = false, started = false;
+
+function show() {
+  const el = $('sync');
+  const off = !navigator.onLine || fromCache;
+  el.className = 'sync ' + (off ? 'off' : pending ? 'wait' : 'ok');
+  el.lastElementChild.textContent = off ? 'オフライン' : pending ? '送信中…' : '同期OK';
+}
+addEventListener('online', show); addEventListener('offline', show);
+
+onAuthStateChanged(auth, u => {
+  if (!u || started) return;
+  started = true;
+  $('loginBox').hidden = true; $('testBox').hidden = false;
+  onSnapshot(doc(db, 'ping', 'test'), { includeMetadataChanges: true }, s => {
+    fromCache = s.metadata.fromCache; pending = s.metadata.hasPendingWrites;
+    const d = s.data() || {};
+    $('count').textContent = d.count ?? 0;
+    $('by').textContent = d.by ? `最後に押した端末：${d.by}（${new Date(d.atMs).toLocaleTimeString('ja-JP')}）` : 'まだ誰も押していません';
+    show();
+  }, e => { $('by').textContent = 'エラー：' + e.code + '（ルールの設定を確認）'; });
+});
+$('loginBtn').onclick = async () => {
+  $('err').textContent = '';
+  try { await signInWithEmailAndPassword(auth, $('lid').value.trim().toLowerCase() + '@imopos.example.com', $('lpw').value); }
+  catch (e) { $('err').textContent = 'ログインできません：' + (e.code || e.message); }
+};
+$('send').onclick = () => {
+  setDoc(doc(db, 'ping', 'test'), { count: increment(1), by: device, atMs: Date.now() }, { merge: true })
+    .catch(e => alert('送信できません：' + e.code));
+};
+</script>
+</body>
+</html>
