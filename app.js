@@ -13,6 +13,13 @@ import {
   setDoc, runTransaction, serverTimestamp, writeBatch
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 
+/* グッズ用の見た目（index.html を触らずに済むようここで追加） */
+document.head.insertAdjacentHTML('beforeend', `<style>
+.pbtn.k-none{background:var(--yellow-l);color:var(--ink);border-color:var(--purple);border-style:dashed}
+.pgroup.k-none h3 small{background:var(--purple-l);color:var(--purple-d)}
+.goods-note{background:var(--yellow-l);border:2px dashed var(--purple);border-radius:14px;padding:10px 14px;font-weight:800;text-align:center}
+</style>`);
+
 /* ================= 基本設定 ================= */
 const EMAIL_DOMAIN = 'imopos.example.com';   // ログインIDを内部でメール形式にするための飾り（実在しなくてよい）
 const TAG_COUNT = 10;
@@ -250,7 +257,9 @@ function makeLine(m) {
   return {
     lineId: rid() + rid(), menuId: m.id, name: m.name, short: m.short || m.name, price: Number(m.price),
     setPrice: m.setPrice == null ? null : Number(m.setPrice), kitchen: m.kitchen, type: m.type,
-    status: 'todo', claimedBy: null, doneBy: null, doneAtMs: null, added: false, removed: false, isSet: false,
+    status: m.type === 'goods' ? 'done' : 'todo', claimedBy: null,
+    doneBy: m.type === 'goods' ? 'レジ' : null, doneAtMs: m.type === 'goods' ? Date.now() : null,
+    added: false, removed: false, isSet: false,
   };
 }
 function cartToLines() {
@@ -259,7 +268,7 @@ function cartToLines() {
   return lines;
 }
 function progress(o) {
-  const act = (o.items || []).filter(l => !l.removed);
+  const act = (o.items || []).filter(l => !l.removed && l.type !== 'goods');
   const g = { A: { d: 0, t: 0 }, B: { d: 0, t: 0 }, D: { d: 0, t: 0 } };
   act.forEach(l => {
     const k = l.kitchen === 'any' ? (l.claimedBy || 'D') : l.kitchen;
@@ -267,8 +276,12 @@ function progress(o) {
     if (l.status === 'done') (g[k] || g.D).d++;
   });
   const done = act.filter(l => l.status === 'done').length;
-  return { ...g, total: act.length, done, ready: act.length > 0 && done === act.length };
+  return { ...g, total: act.length, done, ready: done === act.length };
 }
+const needsKitchen = lines => lines.some(l => !l.removed && l.type !== 'goods');
+const isGoodsOrder = o => o.tag == null;
+const canFix = o => o.status === 'open' || (o.status === 'delivered' && isGoodsOrder(o));
+const tagLabel = o => isGoodsOrder(o) ? 'グッズ' : `${o.tag}番`;
 function summarize(items) {
   const m = new Map();
   items.filter(l => !l.removed).forEach(l => m.set(l.name, (m.get(l.name) || 0) + 1));
@@ -286,7 +299,7 @@ function groupMenu(menu) {
   });
   return groups;
 }
-const kitchenLabel = k => ({ A: 'キッチンA', B: 'キッチンB', any: '手の空いている方' }[k] || k);
+const kitchenLabel = k => ({ A: 'キッチンA', B: 'キッチンB', any: '手の空いている方', none: 'レジで渡す（グッズ）' }[k] || k);
 
 /* ================= 画面の組み立て ================= */
 function render() {
@@ -395,10 +408,11 @@ function registerHTML() {
   const free = freeTags();
   const tag = free.includes(S.chosenTag) ? S.chosenTag : (free[0] ?? null);
   const changeAmt = S.received - p.total;
+  const useTag = needsKitchen(lines);
   let reason = '';
   if (!p.count) reason = '商品を選んでください';
   else if (isOffline()) reason = '通信が切れています（同期OKに戻るまで待ってください）';
-  else if (!free.length) reason = 'タグが空くまでお待ちください（全10枚使用中）';
+  else if (useTag && !free.length) reason = 'タグが空くまでお待ちください（全10枚使用中）';
   else if (S.received < p.total) reason = '預かり金を入力してください';
 
   const prod = groups.map(g => `<div class="pgroup k-${g.kitchen}"><h3>${esc(g.name)}<small>${kitchenLabel(g.kitchen)}</small></h3>
@@ -437,11 +451,11 @@ function registerHTML() {
           ? `<div class="change"><span>おつり</span><b class="num">${yen(changeAmt)}</b></div>`
           : `<div class="change short"><span>あと</span><b class="num">${yen(-changeAmt)} 不足</b></div>`) : ''}
       </div>
-      <div class="card">
+      ${p.count && !useTag ? `<div class="goods-note">グッズのみ：タグは使いません（レジで渡して完了）</div>` : `<div class="card">
         <div class="tagpick"><span class="lbl">渡すタグ</span>
           ${range(1, TAG_COUNT).map(n => `<button class="tg ${n === tag ? 'on' : ''}" data-act="pickTag" data-n="${n}" ${tagInUse(n) ? 'disabled' : ''}>${n}</button>`).join('')}</div>
         <p class="muted" style="margin:6px 0 0;font-size:13px">空き ${free.length}枚／${TAG_COUNT}枚（番号を押すと別のタグに変えられます）</p>
-      </div>
+      </div>`}
       <div class="confirm-reason">${esc(reason)}</div>
       <button class="btn primary big" data-act="checkout" ${reason ? 'disabled' : ''}>会計確定</button>
     </section>
@@ -471,6 +485,32 @@ async function doCheckout() {
   const id = `${todayStr()}-${Date.now().toString(36)}-${rid()}`;
   const want = S.chosenTag;
   const received = S.received;
+  const base = now => ({
+    day: todayStr(), items: lines,
+    subtotal: p.subtotal, setCount: p.setCount, discount: p.discount, total: p.total,
+    received, change: received - p.total,
+    createdAt: serverTimestamp(), createdAtMs: now,
+    cashierUid: S.user.uid, cashierName: me(), editCount: 0,
+    history: [{ at: now, by: me(), action: '会計', total: p.total }],
+  });
+  const hasGoods = lines.some(l => l.type === 'goods');
+  if (!needsKitchen(lines)) {
+    // グッズだけ：タグもキッチンも使わず、その場で受け渡し済みにする
+    const ok = await act(async () => {
+      const now = Date.now();
+      await setDoc(doc(db, 'orders', id), { ...base(now), tag: null, status: 'delivered', deliveredBy: me() + '（レジ）', deliveredAtMs: now });
+    });
+    if (!ok) return;
+    S.cart = {}; S.received = 0; S.chosenTag = null;
+    render();
+    openModal(`<div class="done-tag"><div class="muted" style="font-weight:800">会計完了（グッズ）</div>
+      <div class="msg" style="font-size:30px;margin-top:10px">グッズをその場で渡してください</div>
+      <p class="muted">タグは渡しません</p>
+      <div class="change" style="margin:10px 0"><span>おつり</span><b class="num">${yen(received - p.total)}</b></div>
+      <p class="muted">合計 ${yen(p.total)} ／ 預かり ${yen(received)}</p>
+      <button class="btn primary big" data-act="closeModal">OK（次のお客様へ）</button></div>`);
+    return;
+  }
   const res = await act(() => runTransaction(db, async tx => {
     const snaps = [];
     for (const n of range(1, TAG_COUNT)) snaps.push(await tx.get(doc(db, 'tags', String(n))));
@@ -478,15 +518,7 @@ async function doCheckout() {
     if (!free.length) throw new AppError('タグの空きがありません。受け渡しが終わるまでお待ちください');
     const tag = free.includes(want) ? want : Math.min(...free);
     const now = Date.now();
-    tx.set(doc(db, 'orders', id), {
-      day: todayStr(), tag, status: 'open', items: lines,
-      subtotal: p.subtotal, setCount: p.setCount, discount: p.discount, total: p.total,
-      received, change: received - p.total,
-      createdAt: serverTimestamp(), createdAtMs: now,
-      cashierUid: S.user.uid, cashierName: me(), editCount: 0,
-      deliveredBy: null, deliveredAtMs: null,
-      history: [{ at: now, by: me(), action: '会計', total: p.total }],
-    });
+    tx.set(doc(db, 'orders', id), { ...base(now), tag, status: 'open', deliveredBy: null, deliveredAtMs: null });
     tx.set(doc(db, 'tags', String(tag)), { inUse: true, orderId: id, sinceMs: now });
     return { tag, moved: want != null && want !== tag };
   }));
@@ -497,6 +529,7 @@ async function doCheckout() {
     <div class="bigno">${res.tag}</div>
     <div class="msg">${res.tag}番のタグを渡してください</div>
     ${res.moved ? `<p class="chip o">選んだタグが先に使われたため ${res.tag}番 にしました</p>` : ''}
+    ${hasGoods ? `<div class="goods-note">グッズはいまレジで渡してください</div>` : ''}
     <div class="change" style="margin:10px 0"><span>おつり</span><b class="num">${yen(received - p.total)}</b></div>
     <p class="muted">合計 ${yen(p.total)} ／ 預かり ${yen(received)}</p>
     <button class="btn primary big" data-act="closeModal">OK（次のお客様へ）</button></div>`);
@@ -510,12 +543,12 @@ async function openHistory() {
     const os = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => b.createdAtMs - a.createdAtMs);
     S.histCache = os;
     const st = o => o.status === 'open' ? (progress(o).ready ? '<span class="chip g">受け渡し可</span>' : '<span class="chip">調理中</span>')
-      : o.status === 'delivered' ? '<span class="chip y">受け渡し済み</span>' : '<span class="chip r">取消</span>';
+      : o.status === 'delivered' ? (isGoodsOrder(o) ? '<span class="chip y">グッズ・会計済み</span>' : '<span class="chip y">受け渡し済み</span>') : '<span class="chip r">取消</span>';
     $('#histBody').innerHTML = os.length ? `<ul class="olist">${os.map(o => `<li style="align-items:center">
-      <div style="flex:1"><b style="font-size:18px">${o.tag}番</b> <span class="muted">${hm(o.createdAtMs)}</span> ${st(o)}${o.editCount ? ` <span class="chip o">修正${o.editCount}</span>` : ''}
+      <div style="flex:1"><b style="font-size:18px">${tagLabel(o)}</b> <span class="muted">${hm(o.createdAtMs)}</span> ${st(o)}${o.editCount ? ` <span class="chip o">修正${o.editCount}</span>` : ''}
         <div class="muted" style="font-weight:500;font-size:13px">${esc(summarize(o.items))}</div></div>
       <b class="num" style="min-width:70px;text-align:right">${yen(o.total)}</b>
-      ${o.status === 'open' ? `<button class="btn small" data-act="editOrder" data-o="${o.id}">修正</button><button class="btn small danger" data-act="cancelOrder" data-o="${o.id}">取消</button>` : ''}
+      ${canFix(o) ? `<button class="btn small" data-act="editOrder" data-o="${o.id}">修正</button><button class="btn small danger" data-act="cancelOrder" data-o="${o.id}">取消</button>` : ''}
     </li>`).join('')}</ul><p class="muted" style="font-size:13px">受け渡し済みの注文を直すときは、受け渡し画面の「受け渡し履歴」で元に戻してから修正してください。</p>`
       : '<p class="muted">まだ注文はありません</p>';
   } catch (e) { $('#histBody').innerHTML = `<p class="err-text">${esc(errMsg(e))}</p>`; }
@@ -544,10 +577,11 @@ function renderEdit() {
       <button class="btn small ${rm ? '' : 'danger'}" data-act="editToggle" data-l="${l.lineId}">${rm ? '戻す' : '削除'}</button></li>`;
   }).join('') + e.added.map(l => `<li><span style="flex:1">${esc(l.name)} <span class="badge add">追加</span></span><span class="num">${yen(l.price)}</span>
       <button class="btn small" data-act="editUnadd" data-l="${l.lineId}">×</button></li>`).join('');
-  openModal(`<h2>${e.base.tag}番の注文を修正</h2>
+  const goodsOnly = isGoodsOrder(e.base);
+  openModal(`<h2>${tagLabel(e.base)}の注文を修正</h2>
     <ul class="olist">${rows}</ul>
-    <p style="font-weight:800;margin:14px 0 6px">商品を追加</p>
-    <div class="mini-grid">${S.menu.filter(m => m.active).map(m => `<button class="pbtn k-${m.kitchen}" data-act="editAdd" data-id="${m.id}"><span class="pn">${esc(m.short || m.name)}</span><span class="pp">${yen(m.price)}</span></button>`).join('')}</div>
+    <p style="font-weight:800;margin:14px 0 6px">商品を追加${goodsOnly ? '（グッズのみの会計なのでグッズだけ追加できます。フードは新しく会計してください）' : ''}</p>
+    <div class="mini-grid">${S.menu.filter(m => m.active && (!goodsOnly || m.type === 'goods')).map(m => `<button class="pbtn k-${m.kitchen}" data-act="editAdd" data-id="${m.id}"><span class="pn">${esc(m.short || m.name)}</span><span class="pp">${yen(m.price)}</span></button>`).join('')}</div>
     <div class="totals" style="margin-top:14px">
       <div class="trow"><span>修正前の合計</span><span class="num">${yen(e.base.total)}</span></div>
       ${p.setCount ? `<div class="trow disc"><span>セット割 ${p.setCount}杯</span><span>−${yen(p.discount)}</span></div>` : ''}
@@ -565,12 +599,13 @@ async function saveEdit() {
     const s = await tx.get(ref);
     if (!s.exists()) throw new AppError('注文が見つかりません');
     const o = s.data();
-    if (o.status !== 'open') throw new AppError('受け渡し済み・取消済みの注文は修正できません');
+    if (!canFix(o)) throw new AppError('受け渡し済み・取消済みの注文は修正できません');
     const now = Date.now();
     const items = o.items.map(l => e.remove.has(l.lineId) && !l.removed ? { ...l, removed: true, removedBy: me(), removedAtMs: now } : { ...l });
     e.added.forEach(l => items.push({ ...l, added: true }));
     const p = priceLines(items);
     if (!p.count) throw new AppError('品目が0になります。注文ごとやめる場合は「取消」を使ってください');
+    if (isGoodsOrder(o) && needsKitchen(items)) throw new AppError('グッズだけの会計にフードは追加できません。新しく会計してください');
     const d = p.total - o.total;
     tx.update(ref, {
       items, subtotal: p.subtotal, setCount: p.setCount, discount: p.discount, total: p.total,
@@ -580,17 +615,17 @@ async function saveEdit() {
     return { d, tag: o.tag };
   }));
   if (!diff) return;
-  log('注文修正', { orderId: e.id, tag: diff.tag, diff: diff.d, reason });
+  log('注文修正', { orderId: e.id, tag: diff.tag ?? null, diff: diff.d, reason });
   S.edit = null; closeModal();
   toast(diff.d > 0 ? `修正しました：追加で ${yen(diff.d)} 受け取ってください` : diff.d < 0 ? `修正しました：${yen(-diff.d)} お返ししてください` : '修正しました', 'ok');
 }
 function openCancel(orderId) {
   const o = orderById(orderId) || S.histCache?.find(x => x.id === orderId);
   if (!o) return;
-  openModal(`<h2>${o.tag}番の注文を取り消しますか？</h2>
+  openModal(`<h2>${tagLabel(o)}の注文を取り消しますか？</h2>
     <p>${esc(summarize(o.items))}</p>
     <div class="diffmsg minus">お客様に <span class="num">${yen(o.total)}</span> 返す</div>
-    <p class="muted">取り消すと売上から外れ、${o.tag}番のタグは空きに戻ります。キッチンの画面からも消えます。</p>
+    <p class="muted">${isGoodsOrder(o) ? '取り消すと売上から外れます。グッズは返してもらってください。' : `取り消すと売上から外れ、${o.tag}番のタグは空きに戻ります。キッチンの画面からも消えます。`}</p>
     <div class="field"><label for="cancelReason">理由（任意）</label><input class="input" id="cancelReason" placeholder="例：押し間違い"></div>
     <div class="modal-actions"><button class="btn" data-act="closeModal">やめる</button>
       <button class="btn danger" data-act="cancelConfirm" data-o="${o.id}">取り消す</button></div>`);
@@ -602,18 +637,18 @@ async function doCancel(orderId) {
     const s = await tx.get(ref);
     if (!s.exists()) throw new AppError('注文が見つかりません');
     const o = s.data();
-    if (o.status !== 'open') throw new AppError('この注文はもう受け渡し済みか取消済みです');
-    const tref = doc(db, 'tags', String(o.tag));
-    const t = await tx.get(tref);
+    if (!canFix(o)) throw new AppError('この注文はもう受け渡し済みか取消済みです');
+    const tref = isGoodsOrder(o) ? null : doc(db, 'tags', String(o.tag));
+    const t = tref ? await tx.get(tref) : null;
     const now = Date.now();
     tx.update(ref, { status: 'cancelled', cancelledBy: me(), cancelledAtMs: now, cancelReason: reason,
       history: [...(o.history || []), { at: now, by: me(), action: '取消', reason }] });
-    if (t.exists() && t.data().orderId === orderId) tx.set(tref, { inUse: false, orderId: null, sinceMs: null });
+    if (t && t.exists() && t.data().orderId === orderId) tx.set(tref, { inUse: false, orderId: null, sinceMs: null });
     return o;
   }));
   if (!r) return;
-  log('注文取消', { orderId, tag: r.tag, total: r.total, reason });
-  closeModal(); toast(`${r.tag}番の注文を取り消しました。${yen(r.total)} お返ししてください`, 'ok');
+  log('注文取消', { orderId, tag: r.tag ?? null, total: r.total, reason });
+  closeModal(); toast(`${tagLabel(r)}の注文を取り消しました。${yen(r.total)} お返ししてください`, 'ok');
 }
 
 /* ---------- キッチン ---------- */
@@ -716,7 +751,7 @@ function openHandTile(orderId) {
     const p = progress(o);
     openModal(`<h2><span class="tagno" style="display:inline-grid;vertical-align:middle;margin-right:8px">${o.tag}</span>${p.ready ? '受け渡しできます' : 'まだ調理中です'}</h2>
       <ul class="olist">${o.items.filter(l => !l.removed).map(l => `<li><span>${esc(l.name)}${l.added ? '<span class="badge add">追加</span>' : ''}</span>
-        ${l.status === 'done' ? '<span class="chip g">✓ 完成</span>' : `<span class="chip o">${l.kitchen === 'any' ? (l.claimedBy ? `${l.claimedBy}で調理中` : '未着手') : `${l.kitchen}で調理中`}</span>`}</li>`).join('')}</ul>
+        ${l.type === 'goods' ? '<span class="chip y">グッズ・レジで渡し済み</span>' : l.status === 'done' ? '<span class="chip g">✓ 完成</span>' : `<span class="chip o">${l.kitchen === 'any' ? (l.claimedBy ? `${l.claimedBy}で調理中` : '未着手') : `${l.kitchen}で調理中`}</span>`}</li>`).join('')}</ul>
       <p class="muted">受付 ${hm(o.createdAtMs)}・レジ ${esc(o.cashierName || '')}</p>
       <div class="modal-actions" style="justify-content:stretch"><button class="btn" data-act="closeModal">閉じる</button>
         ${p.ready ? `<button class="btn green big" style="flex:1" data-act="deliver" data-o="${o.id}">受け渡し完了（タグ回収）</button>` : ''}</div>`);
@@ -749,7 +784,7 @@ async function openHandHistory() {
   openModal(`<h2>受け渡し履歴（今日）</h2><div id="hhBody">読み込み中…</div><div class="modal-actions"><button class="btn" data-act="closeModal">閉じる</button></div>`);
   try {
     const snap = await getDocs(query(collection(db, 'orders'), where('day', '==', todayStr()), where('status', '==', 'delivered')));
-    const os = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (b.deliveredAtMs || 0) - (a.deliveredAtMs || 0)).slice(0, 15);
+    const os = snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(o => !isGoodsOrder(o)).sort((a, b) => (b.deliveredAtMs || 0) - (a.deliveredAtMs || 0)).slice(0, 15);
     $('#hhBody').innerHTML = os.length ? `<ul class="olist">${os.map(o => `<li style="align-items:center"><div style="flex:1"><b>${o.tag}番</b> <span class="muted">${hm(o.deliveredAtMs)} ${esc(o.deliveredBy || '')}</span>
       <div class="muted" style="font-size:13px;font-weight:500">${esc(summarize(o.items))}</div></div>
       ${o.forced ? '<span class="chip r">強制解放</span>' : `<button class="btn small" data-act="undeliver" data-o="${o.id}" ${tagInUse(o.tag) ? 'disabled title="タグが次の注文で使用中"' : ''}>元に戻す</button>`}</li>`).join('')}</ul>
@@ -914,7 +949,7 @@ function csvOrders() {
   const os = (S.admin.reportOrders || []).slice().sort((a, b) => a.createdAtMs - b.createdAtMs);
   const st = { open: '受け渡し前', delivered: '受け渡し済み', cancelled: '取消' };
   downloadCSV(`注文一覧_${S.admin.date}.csv`, [['営業日', '受付時刻', 'タグ', '品目', '小計', 'セット割', '合計', '預かり', 'おつり', '状態', 'レジ担当', '受け渡し担当', '受け渡し時刻', '修正回数', '注文ID'],
-    ...os.map(o => [o.day, hms(o.createdAtMs), o.tag, summarize(o.items), o.subtotal, o.discount, o.total, o.received, o.change, st[o.status] || o.status, o.cashierName, o.deliveredBy || '', o.deliveredAtMs ? hms(o.deliveredAtMs) : '', o.editCount || 0, o.id])]);
+    ...os.map(o => [o.day, hms(o.createdAtMs), o.tag ?? 'グッズ', summarize(o.items), o.subtotal, o.discount, o.total, o.received, o.change, st[o.status] || o.status, o.cashierName, o.deliveredBy || '', o.deliveredAtMs ? hms(o.deliveredAtMs) : '', o.editCount || 0, o.id])]);
 }
 function csvReport() {
   const r = computeReport(S.admin.reportOrders || [], S.admin.half);
@@ -992,11 +1027,11 @@ function menuAdminHTML() {
         <td><input class="input" data-f="name" value="${esc(m.name)}" style="width:170px"></td>
         <td><input class="input num" data-f="price" type="number" inputmode="numeric" value="${m.price}" style="width:80px"></td>
         <td><input class="input num" data-f="setPrice" type="number" inputmode="numeric" value="${m.setPrice ?? ''}" placeholder="なし" style="width:80px"></td>
-        <td><select class="input" data-f="kitchen" style="width:120px">${['A', 'B', 'any'].map(k => `<option value="${k}" ${m.kitchen === k ? 'selected' : ''}>${kitchenLabel(k)}</option>`).join('')}</select></td>
+        <td><select class="input" data-f="kitchen" style="width:170px">${['A', 'B', 'any', 'none'].map(k => `<option value="${k}" ${m.kitchen === k ? 'selected' : ''}>${kitchenLabel(k)}</option>`).join('')}</select></td>
         <td><input class="input num" data-f="order" type="number" value="${m.order ?? 0}" style="width:60px"></td>
         <td><button class="btn small primary" data-act="menuSave" data-id="${m.id}">保存</button></td></tr>`).join('')}</tbody></table></div>
-      <p class="muted" style="font-size:13px">「セット価格」を入れた商品はドリンク扱いになり、フードと一緒ならその価格になります。担当を「手の空いている方」にすると両キッチンに表示されます。</p>
-      <button class="btn small" data-act="menuAdd">＋ 商品を追加</button></div>`;
+      <p class="muted" style="font-size:13px">「セット価格」を入れた商品はドリンク扱いになり、フードと一緒ならその価格になります。担当を「手の空いている方」にすると両キッチンに表示されます。担当を「レジで渡す（グッズ）」にすると、キッチンには出ず、セット割の数にも入らず、レジで会計完了になります。</p>
+      <div class="row"><button class="btn small" data-act="menuAdd">＋ 商品を追加</button><button class="btn small yellow" data-act="menuAddGoods">＋ グッズを追加</button></div></div>`;
 }
 async function menuToggle(id) {
   const m = S.menu.find(x => x.id === id); if (!m) return;
@@ -1012,15 +1047,18 @@ async function menuSave(id) {
   const kitchen = f('kitchen');
   if (!f('name') || !(price >= 0)) { toast('名前と価格を確認してください', 'err'); return; }
   const data = { group: f('group') || 'その他', short: f('short') || f('name'), name: f('name'), price,
-    setPrice: sp === '' ? null : Math.round(Number(sp)), kitchen, type: sp === '' ? 'food' : 'drink', order: Number(f('order')) || 0 };
+    setPrice: kitchen === 'none' || sp === '' ? null : Math.round(Number(sp)), kitchen,
+    type: kitchen === 'none' ? 'goods' : sp === '' ? 'food' : 'drink', order: Number(f('order')) || 0 };
   if (!confirm(`「${data.name}」を ${yen(price)}${data.setPrice != null ? `（セット ${yen(data.setPrice)}）` : ''}・${kitchenLabel(kitchen)} で保存しますか？\n※すでに会計した注文の金額は変わりません`)) return;
-  const exists = S.menu.some(m => m.id === id);
+  const exists = S.menu.some(m => m.id === id && !m._new);
   const ok = await act(() => setDoc(doc(db, 'menu', id), exists ? data : { ...data, active: true }, { merge: true }), '保存しました');
   if (ok) { log('メニュー変更', { id, ...data }); rerender(); }
 }
-function menuAdd() {
-  const id = 'item_' + rid();
-  S.menu.push({ id, group: 'その他', short: '新しい商品', name: '新しい商品', price: 0, setPrice: null, kitchen: 'A', type: 'food', order: S.menu.length, active: true });
+function menuAdd(goods = false) {
+  const id = (goods ? 'goods_' : 'item_') + rid();
+  S.menu.push(goods
+    ? { id, group: 'グッズ', short: '新しいグッズ', name: 'グッズ 新しいグッズ', price: 0, setPrice: null, kitchen: 'none', type: 'goods', order: S.menu.length + 100, active: true, _new: true }
+    : { id, group: 'その他', short: '新しい商品', name: '新しい商品', price: 0, setPrice: null, kitchen: 'A', type: 'food', order: S.menu.length, active: true, _new: true });
   rerender();
   toast('表の一番下に追加しました。名前と価格を入れて「保存」を押してください');
 }
@@ -1216,6 +1254,7 @@ document.addEventListener('click', e => {
     case 'menuToggle': menuToggle(d.id); return;
     case 'menuSave': menuSave(d.id); return;
     case 'menuAdd': menuAdd(); return;
+    case 'menuAddGoods': menuAdd(true); return;
     case 'forceFree': forceFree(Number(d.n)); return;
     case 'bulkCreate': bulkCreate(); return;
     case 'renameUser': renameUser(d.id); return;
