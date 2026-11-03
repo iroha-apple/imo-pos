@@ -668,12 +668,12 @@ async function doCancel(orderId) {
 function mobQty(id) { return S.mob.qty[id] || 0; }
 function mobPrice(m) { const v = S.mob.price[m.id]; return v == null || v === '' ? Number(m.price) : Math.max(0, Math.round(Number(v) || 0)); }
 function mobTotals() {
-  const items = S.menu.filter(m => mobQty(m.id) > 0);
+  const items = S.menu.filter(m => m.type !== 'drink' && mobQty(m.id) > 0);
   return { count: sum(items, m => mobQty(m.id)), total: sum(items, m => mobQty(m.id) * mobPrice(m)), items };
 }
 function mobileHTML() {
   S.mob ||= { qty: {}, price: {}, memo: '' };
-  const groups = groupMenu(S.menu.filter(m => m.active || mobQty(m.id)));
+  const groups = groupMenu(S.menu.filter(m => m.type !== 'drink' && (m.active || mobQty(m.id))));
   return `<div id="mobRoot" style="max-width:820px;margin:0 auto">
     <div class="card" style="margin-bottom:12px"><div class="section-title" style="margin:0">移動販売の売上をまとめて入力</div>
       <p class="muted" style="margin:6px 0 0;font-size:14px">屋台から離れて売った調理済みの商品を、個数と単価で記録します。キッチンにもタグにも行きません。単価は値引きなどで変えられます。</p></div>
@@ -685,7 +685,7 @@ function mobileHTML() {
           <button class="qbtn" data-act="mobDec" data-id="${m.id}" aria-label="減らす">−</button>
           <input class="input num" style="width:70px;min-height:44px;text-align:center" type="number" inputmode="numeric" min="0" data-mob-qty="${m.id}" value="${mobQty(m.id) || ''}" placeholder="0" aria-label="個数">
           <button class="qbtn" data-act="mobInc" data-id="${m.id}" aria-label="増やす">＋</button></div></div>`).join('')}</div>`).join('')}
-    <div class="card" style="position:sticky;bottom:10px;box-shadow:0 4px 0 rgba(46,26,71,.15)">
+    <div class="card">
       <div class="field"><label for="mobMemo">メモ（任意・場所や回数など）</label><input class="input" id="mobMemo" data-mob-memo value="${esc(S.mob.memo)}" placeholder="例：体育館前 1回目"></div>
       <div class="trow total"><span>合計 <span id="mobCount" class="num"></span></span><span class="num" id="mobTotal"></span></div>
       <p class="confirm-reason" id="mobReason"></p>
