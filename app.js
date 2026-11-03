@@ -17,6 +17,13 @@ import {
 document.head.insertAdjacentHTML('beforeend', `<style>
 .pbtn.k-none{background:var(--yellow-l);color:var(--ink);border-color:var(--purple);border-style:dashed}
 .pgroup.k-none h3 small{background:var(--purple-l);color:var(--purple-d)}
+.mrow{display:grid;grid-template-columns:1fr auto;gap:6px 10px;align-items:center;padding:10px 0;border-bottom:2px dashed var(--line)}
+.mrow:last-child{border-bottom:0}
+.mrow .nm{font-weight:800;font-size:17px;line-height:1.25}
+.mrow .nm small{display:block;font-weight:500;color:var(--ink-2);font-size:12px}
+.mrow .amt{font-weight:800;font-size:18px;text-align:right}
+.mrow .ctl{grid-column:1 / -1;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.mrow .ctl .price{display:flex;align-items:center;gap:4px;margin-right:auto;font-size:13px;font-weight:700;color:var(--ink-2)}
 .goods-note{background:var(--yellow-l);border:2px dashed var(--purple);border-radius:14px;padding:10px 14px;font-weight:800;text-align:center}
 </style>`);
 
@@ -30,6 +37,7 @@ const ROLES = {
   A:        { label: 'キッチンA', sub: '芋ボール＋ドリンク' },
   B:        { label: 'キッチンB', sub: '焼き芋＋ドリンク' },
   handoff:  { label: '受け渡し', sub: 'タグ回収' },
+  mobile:   { label: '移動販売', sub: 'まとめて入力' },
   admin:    { label: '管理・日報', sub: '売上・照合・設定' },
 };
 const DEFAULT_MENU = [
@@ -281,7 +289,8 @@ function progress(o) {
 const needsKitchen = lines => lines.some(l => !l.removed && l.type !== 'goods');
 const isGoodsOrder = o => o.tag == null;
 const canFix = o => o.status === 'open' || (o.status === 'delivered' && isGoodsOrder(o));
-const tagLabel = o => isGoodsOrder(o) ? 'グッズ' : `${o.tag}番`;
+const isMobile = o => o.channel === 'mobile';
+const tagLabel = o => isMobile(o) ? '移動販売' : isGoodsOrder(o) ? 'グッズ' : `${o.tag}番`;
 function summarize(items) {
   const m = new Map();
   items.filter(l => !l.removed).forEach(l => m.set(l.name, (m.get(l.name) || 0) + 1));
@@ -311,6 +320,7 @@ function render() {
     root.innerHTML = headerHTML() + `<main>${rolePickHTML()}</main>`; updateSync(); return;
   }
   if (S.role === 'admin' && $('#adminRoot') && !S.forceRender) { refreshAdminLive(); return; }
+  if (S.role === 'mobile' && $('#mobRoot') && !S.forceRender) { updateMobTotals(); return; }
   const wasAdminFresh = S.role === 'admin';
   S.forceRender = false;
   const scrolls = $$('[data-scroll]').map(el => [el.dataset.scroll, el.scrollTop]);
@@ -322,6 +332,7 @@ function render() {
   window.scrollTo(0, y);
   updateSync();
   if (wasAdminFresh) afterAdminRender();
+  if (S.role === 'mobile') updateMobTotals();
 }
 function rerender() { S.forceRender = true; render(); }
 
@@ -343,6 +354,7 @@ function screenHTML() {
     case 'A': case 'B': return kitchenHTML(S.role);
     case 'handoff': return handoffHTML();
     case 'admin': return adminHTML();
+    case 'mobile': return mobileHTML();
   }
   return '';
 }
@@ -542,13 +554,13 @@ async function openHistory() {
     const snap = await getDocs(query(collection(db, 'orders'), where('day', '==', todayStr())));
     const os = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => b.createdAtMs - a.createdAtMs);
     S.histCache = os;
-    const st = o => o.status === 'open' ? (progress(o).ready ? '<span class="chip g">受け渡し可</span>' : '<span class="chip">調理中</span>')
+    const st = o => isMobile(o) && o.status !== 'cancelled' ? '<span class="chip o">移動販売</span>' : o.status === 'open' ? (progress(o).ready ? '<span class="chip g">受け渡し可</span>' : '<span class="chip">調理中</span>')
       : o.status === 'delivered' ? (isGoodsOrder(o) ? '<span class="chip y">グッズ・会計済み</span>' : '<span class="chip y">受け渡し済み</span>') : '<span class="chip r">取消</span>';
     $('#histBody').innerHTML = os.length ? `<ul class="olist">${os.map(o => `<li style="align-items:center">
       <div style="flex:1"><b style="font-size:18px">${tagLabel(o)}</b> <span class="muted">${hm(o.createdAtMs)}</span> ${st(o)}${o.editCount ? ` <span class="chip o">修正${o.editCount}</span>` : ''}
         <div class="muted" style="font-weight:500;font-size:13px">${esc(summarize(o.items))}</div></div>
       <b class="num" style="min-width:70px;text-align:right">${yen(o.total)}</b>
-      ${canFix(o) ? `<button class="btn small" data-act="editOrder" data-o="${o.id}">修正</button><button class="btn small danger" data-act="cancelOrder" data-o="${o.id}">取消</button>` : ''}
+      ${canFix(o) ? `${isMobile(o) ? '' : `<button class="btn small" data-act="editOrder" data-o="${o.id}">修正</button>`}<button class="btn small danger" data-act="cancelOrder" data-o="${o.id}">取消</button>` : ''}
     </li>`).join('')}</ul><p class="muted" style="font-size:13px">受け渡し済みの注文を直すときは、受け渡し画面の「受け渡し履歴」で元に戻してから修正してください。</p>`
       : '<p class="muted">まだ注文はありません</p>';
   } catch (e) { $('#histBody').innerHTML = `<p class="err-text">${esc(errMsg(e))}</p>`; }
@@ -624,8 +636,8 @@ function openCancel(orderId) {
   if (!o) return;
   openModal(`<h2>${tagLabel(o)}の注文を取り消しますか？</h2>
     <p>${esc(summarize(o.items))}</p>
-    <div class="diffmsg minus">お客様に <span class="num">${yen(o.total)}</span> 返す</div>
-    <p class="muted">${isGoodsOrder(o) ? '取り消すと売上から外れます。グッズは返してもらってください。' : `取り消すと売上から外れ、${o.tag}番のタグは空きに戻ります。キッチンの画面からも消えます。`}</p>
+    ${isMobile(o) ? '' : `<div class="diffmsg minus">お客様に <span class="num">${yen(o.total)}</span> 返す</div>`}
+    <p class="muted">${isMobile(o) ? '取り消すと売上から外れます。正しい内容で記録し直してください。' : isGoodsOrder(o) ? '取り消すと売上から外れます。グッズは返してもらってください。' : `取り消すと売上から外れ、${o.tag}番のタグは空きに戻ります。キッチンの画面からも消えます。`}</p>
     <div class="field"><label for="cancelReason">理由（任意）</label><input class="input" id="cancelReason" placeholder="例：押し間違い"></div>
     <div class="modal-actions"><button class="btn" data-act="closeModal">やめる</button>
       <button class="btn danger" data-act="cancelConfirm" data-o="${o.id}">取り消す</button></div>`);
@@ -648,7 +660,92 @@ async function doCancel(orderId) {
   }));
   if (!r) return;
   log('注文取消', { orderId, tag: r.tag ?? null, total: r.total, reason });
-  closeModal(); toast(`${tagLabel(r)}の注文を取り消しました。${yen(r.total)} お返ししてください`, 'ok');
+  closeModal(); toast(isMobile(r) ? `移動販売の記録（${yen(r.total)}）を取り消しました` : `${tagLabel(r)}の注文を取り消しました。${yen(r.total)} お返ししてください`, 'ok');
+}
+
+/* ---------- 移動販売 ---------- */
+// 屋台の外で売った調理済みの商品を、まとめて「個数×単価」で記録する。キッチン・タグは通らない。
+function mobQty(id) { return S.mob.qty[id] || 0; }
+function mobPrice(m) { const v = S.mob.price[m.id]; return v == null || v === '' ? Number(m.price) : Math.max(0, Math.round(Number(v) || 0)); }
+function mobTotals() {
+  const items = S.menu.filter(m => mobQty(m.id) > 0);
+  return { count: sum(items, m => mobQty(m.id)), total: sum(items, m => mobQty(m.id) * mobPrice(m)), items };
+}
+function mobileHTML() {
+  S.mob ||= { qty: {}, price: {}, memo: '' };
+  const groups = groupMenu(S.menu.filter(m => m.active || mobQty(m.id)));
+  return `<div id="mobRoot" style="max-width:820px;margin:0 auto">
+    <div class="card" style="margin-bottom:12px"><div class="section-title" style="margin:0">移動販売の売上をまとめて入力</div>
+      <p class="muted" style="margin:6px 0 0;font-size:14px">屋台から離れて売った調理済みの商品を、個数と単価で記録します。キッチンにもタグにも行きません。単価は値引きなどで変えられます。</p></div>
+    ${groups.map(g => `<div class="card" style="margin-bottom:12px"><div class="section-title" style="margin:0 0 6px">${esc(g.name)}</div>
+      ${g.items.map(m => `<div class="mrow">
+        <div class="nm">${esc(m.short || m.name)}<small>通常 ${yen(m.price)}</small></div>
+        <span class="amt num" id="mobAmt-${m.id}">${yen(mobQty(m.id) * mobPrice(m))}</span>
+        <div class="ctl"><label class="price">単価 ¥<input class="input num" style="width:96px;min-height:44px;text-align:right" type="number" inputmode="numeric" min="0" data-mob-price="${m.id}" value="${S.mob.price[m.id] ?? m.price}"></label>
+          <button class="qbtn" data-act="mobDec" data-id="${m.id}" aria-label="減らす">−</button>
+          <input class="input num" style="width:70px;min-height:44px;text-align:center" type="number" inputmode="numeric" min="0" data-mob-qty="${m.id}" value="${mobQty(m.id) || ''}" placeholder="0" aria-label="個数">
+          <button class="qbtn" data-act="mobInc" data-id="${m.id}" aria-label="増やす">＋</button></div></div>`).join('')}</div>`).join('')}
+    <div class="card" style="position:sticky;bottom:10px;box-shadow:0 4px 0 rgba(46,26,71,.15)">
+      <div class="field"><label for="mobMemo">メモ（任意・場所や回数など）</label><input class="input" id="mobMemo" data-mob-memo value="${esc(S.mob.memo)}" placeholder="例：体育館前 1回目"></div>
+      <div class="trow total"><span>合計 <span id="mobCount" class="num"></span></span><span class="num" id="mobTotal"></span></div>
+      <p class="confirm-reason" id="mobReason"></p>
+      <div class="row"><button class="btn ghost" data-act="mobClear">全部消す</button><button class="btn" data-act="mobList">今日の記録・取消</button>
+        <button class="btn primary" style="flex:1;min-height:56px;font-size:20px" data-act="mobSave" id="mobSave">この内容で記録する</button></div>
+    </div></div>`;
+}
+function updateMobTotals() {
+  if (!$('#mobRoot')) return;
+  const t = mobTotals();
+  S.menu.forEach(m => { const el = $('#mobAmt-' + m.id); if (el) el.textContent = yen(mobQty(m.id) * mobPrice(m)); });
+  $('#mobCount').textContent = `（${t.count}点）`;
+  $('#mobTotal').textContent = yen(t.total);
+  const reason = !t.count ? '個数を入力してください' : isOffline() ? '通信が切れています（同期OKに戻るまで待ってください）' : '';
+  $('#mobReason').textContent = reason;
+  $('#mobSave').disabled = !!reason;
+}
+function mobSetQty(id, q) {
+  S.mob.qty[id] = Math.max(0, Math.min(999, Math.floor(Number(q) || 0)));
+  const el = $(`[data-mob-qty="${id}"]`); if (el && document.activeElement !== el) el.value = S.mob.qty[id] || '';
+  updateMobTotals();
+}
+async function mobSave() {
+  const t = mobTotals(); if (!t.count) return;
+  const memo = ($('#mobMemo')?.value || '').trim();
+  const detail = t.items.map(m => `${m.short || m.name} ${mobQty(m.id)}個 × ${yen(mobPrice(m))}`).join('\n');
+  if (!confirm(`移動販売の売上を記録します。\n\n${detail}\n\n合計 ${t.count}点 ${yen(t.total)}${memo ? `\nメモ：${memo}` : ''}`)) return;
+  const id = `${todayStr()}-${Date.now().toString(36)}-${rid()}`;
+  const ok = await act(async () => {
+    const now = Date.now();
+    const items = [];
+    t.items.forEach(m => { for (let i = 0; i < mobQty(m.id); i++) items.push({ ...makeLine(m), price: mobPrice(m), setPrice: null, status: 'done', doneBy: '移動販売', doneAtMs: now }); });
+    await setDoc(doc(db, 'orders', id), {
+      day: todayStr(), channel: 'mobile', memo, tag: null, status: 'delivered', items,
+      subtotal: t.total, setCount: 0, discount: 0, total: t.total, received: t.total, change: 0,
+      createdAt: serverTimestamp(), createdAtMs: now, cashierUid: S.user.uid, cashierName: me(), editCount: 0,
+      deliveredBy: me() + '（移動販売）', deliveredAtMs: now,
+      history: [{ at: now, by: me(), action: '移動販売の記録', total: t.total }],
+    });
+  }, `移動販売 ${t.count}点 ${yen(t.total)} を記録しました`);
+  if (!ok) return;
+  log('移動販売', { orderId: id, count: t.count, total: t.total, memo });
+  S.mob = { qty: {}, price: S.mob.price, memo: '' };
+  rerender();
+}
+async function mobList() {
+  S.modalRefresh = null;
+  openModal(`<h2>今日の移動販売の記録</h2><div id="mobListBody">読み込み中…</div><div class="modal-actions"><button class="btn" data-act="closeModal">閉じる</button></div>`, 'wide');
+  try {
+    const snap = await getDocs(query(collection(db, 'orders'), where('day', '==', todayStr()), where('channel', '==', 'mobile')));
+    const os = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => b.createdAtMs - a.createdAtMs);
+    S.histCache = os;
+    const valid = os.filter(o => o.status !== 'cancelled');
+    $('#mobListBody').innerHTML = os.length ? `<p style="font-weight:800">今日の移動販売 合計 ${yen(sum(valid, o => o.total))}（${valid.length}回）</p><ul class="olist">${os.map(o => `<li style="align-items:center">
+      <div style="flex:1"><b>${hm(o.createdAtMs)}</b> ${o.memo ? `<span class="chip">${esc(o.memo)}</span>` : ''} ${o.status === 'cancelled' ? '<span class="chip r">取消</span>' : ''}
+        <div class="muted" style="font-size:13px;font-weight:500">${esc(summarize(o.items))}</div></div>
+      <b class="num" style="min-width:76px;text-align:right">${yen(o.total)}</b>
+      ${o.status !== 'cancelled' ? `<button class="btn small danger" data-act="cancelOrder" data-o="${o.id}">取消</button>` : ''}</li>`).join('')}</ul>
+      <p class="muted" style="font-size:13px">間違えたときは「取消」してから、正しい内容で記録し直してください。</p>` : '<p class="muted">まだ記録はありません</p>';
+  } catch (e) { $('#mobListBody').innerHTML = `<p class="err-text">${esc(errMsg(e))}</p>`; }
 }
 
 /* ---------- キッチン ---------- */
@@ -890,6 +987,7 @@ function computeReport(orders, half) {
   const list = [...items.values()].sort((a, b) => b.count - a.count || b.amount - a.amount);
   return {
     sales: sum(valid, o => o.total), count: valid.length, discount: sum(valid, o => o.discount),
+    mobileSales: sum(valid.filter(isMobile), o => o.total), mobileCount: valid.filter(isMobile).length,
     slots, outside, items: list,
     drinkSet: sum(list.filter(i => i.type === 'drink'), i => i.setCount),
     drinkSingle: sum(list.filter(i => i.type === 'drink'), i => i.count - i.setCount),
@@ -904,7 +1002,9 @@ function reportHTML(orders) {
       <div class="kpi main"><div class="l">${dayLabel(S.admin.date)} の売上</div><div class="v num">${yen(r.sales)}</div></div>
       <div class="kpi"><div class="l">注文数</div><div class="v num">${r.count}件</div></div>
       <div class="kpi"><div class="l">平均単価</div><div class="v num">${r.count ? yen(r.sales / r.count) : '—'}</div></div>
-      <div class="kpi"><div class="l">セット割（合計）</div><div class="v num">−${yen(r.discount)}</div></div></div>
+      <div class="kpi"><div class="l">セット割（合計）</div><div class="v num">−${yen(r.discount)}</div></div>
+      <div class="kpi"><div class="l">うち屋台</div><div class="v num">${yen(r.sales - r.mobileSales)}</div></div>
+      <div class="kpi"><div class="l">うち移動販売（${r.mobileCount}回）</div><div class="v num">${yen(r.mobileSales)}</div></div></div>
     ${r.open ? `<p class="chip o">受け渡し前の注文が ${r.open}件 あります（売上には含めています）</p>` : ''}
     <div class="grid2">
       <div class="card"><div class="section-title">時間帯別売上</div><div class="bars">
@@ -949,7 +1049,7 @@ function csvOrders() {
   const os = (S.admin.reportOrders || []).slice().sort((a, b) => a.createdAtMs - b.createdAtMs);
   const st = { open: '受け渡し前', delivered: '受け渡し済み', cancelled: '取消' };
   downloadCSV(`注文一覧_${S.admin.date}.csv`, [['営業日', '受付時刻', 'タグ', '品目', '小計', 'セット割', '合計', '預かり', 'おつり', '状態', 'レジ担当', '受け渡し担当', '受け渡し時刻', '修正回数', '注文ID'],
-    ...os.map(o => [o.day, hms(o.createdAtMs), o.tag ?? 'グッズ', summarize(o.items), o.subtotal, o.discount, o.total, o.received, o.change, st[o.status] || o.status, o.cashierName, o.deliveredBy || '', o.deliveredAtMs ? hms(o.deliveredAtMs) : '', o.editCount || 0, o.id])]);
+    ...os.map(o => [o.day, hms(o.createdAtMs), o.tag ?? tagLabel(o), summarize(o.items), o.subtotal, o.discount, o.total, o.received, o.change, st[o.status] || o.status, o.cashierName, o.deliveredBy || '', o.deliveredAtMs ? hms(o.deliveredAtMs) : '', o.editCount || 0, o.id])]);
 }
 function csvReport() {
   const r = computeReport(S.admin.reportOrders || [], S.admin.half);
@@ -975,6 +1075,7 @@ async function loadCash() {
     const [orders, cc] = await Promise.all([fetchOrdersOfDay(date), getDoc(doc(db, 'cashChecks', date))]);
     if (S.admin.date !== date || !$('#cashResult')) return;
     S.admin.cashSales = sum(orders.filter(o => o.status !== 'cancelled'), o => o.total);
+    S.admin.cashMobile = sum(orders.filter(o => o.status !== 'cancelled' && isMobile(o)), o => o.total);
     if (cc.exists()) {
       const c = cc.data();
       $('#cFloat').value = c.float ?? '';
@@ -1000,6 +1101,7 @@ function calcCash() {
   box.innerHTML = `<table class="t"><tbody>
     <tr><td>釣銭準備金</td><td class="r num">${yen(v.float)}</td></tr>
     <tr><td>＋ この日の現金売上（取消を除く）</td><td class="r num">${yen(v.sales)}</td></tr>
+    ${S.admin.cashMobile ? `<tr><td class="muted" style="font-size:13px">　うち移動販売（別の袋の場合は、そのお金も一緒に数える）</td><td class="r num muted">${yen(S.admin.cashMobile)}</td></tr>` : ''}
     <tr><td><b>＝ あるべき金額</b></td><td class="r num"><b>${yen(v.expected)}</b></td></tr>
     <tr><td><b>数えた金額</b></td><td class="r num"><b>${yen(v.actual)}</b></td></tr></tbody></table>
     <div class="diff-box ${v.diff === 0 ? 'diff-ok' : 'diff-ng'}" style="margin-top:10px">${v.diff === 0 ? 'ぴったり合っています 🎉' : v.diff > 0 ? `${yen(v.diff)} 多い` : `${yen(-v.diff)} 足りない`}</div>`;
@@ -1259,12 +1361,24 @@ document.addEventListener('click', e => {
     case 'bulkCreate': bulkCreate(); return;
     case 'renameUser': renameUser(d.id); return;
     case 'saveSettings': saveSettings(); return;
+    // 移動販売
+    case 'mobInc': mobSetQty(d.id, mobQty(d.id) + 1); return;
+    case 'mobDec': mobSetQty(d.id, mobQty(d.id) - 1); return;
+    case 'mobClear': if (confirm('入力した個数を全部消しますか？')) { S.mob = { qty: {}, price: {}, memo: '' }; rerender(); } return;
+    case 'mobSave': mobSave(); return;
+    case 'mobList': mobList(); return;
   }
 });
 document.addEventListener('submit', e => {
   if (e.target.id === 'loginForm') { e.preventDefault(); doLogin(e.target); }
 });
-document.addEventListener('input', e => { if (e.target.matches('[data-cash]')) calcCash(); });
+document.addEventListener('input', e => {
+  if (e.target.matches('[data-cash]')) calcCash();
+  const t = e.target.dataset || {};
+  if (t.mobQty) { S.mob.qty[t.mobQty] = Math.max(0, Math.min(999, Math.floor(Number(e.target.value) || 0))); updateMobTotals(); }
+  if (t.mobPrice) { S.mob.price[t.mobPrice] = e.target.value; updateMobTotals(); }
+  if (e.target.matches('[data-mob-memo]')) S.mob.memo = e.target.value;
+});
 document.addEventListener('change', e => {
   const a = e.target.dataset?.actChange;
   if (a && e.target.value) { S.admin.date = e.target.value; rerender(); }
